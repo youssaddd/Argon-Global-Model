@@ -3,69 +3,96 @@ import matplotlib.pyplot as plt
 import os
 import re
 
-# --- Configuration ---
+# --- CONFIGURATION ---
 file_path = r"C:\Users\Youssef\Desktop\AEPT\globalKin\global_kin.tec"
 
-# --- Check if file exists ---
+# --- CHECK FILE EXISTENCE ---
 if not os.path.exists(file_path):
-    print(f"Error: File not found at: {file_path}")
+    print(f"[ERROR] File not found: {file_path}")
     exit()
 
-# --- Read file lines ---
+# --- READ FILE LINES ---
 with open(file_path, "r") as f:
     lines = f.readlines()
 
-# --- Parse headers from VARIABLES block ---
+# --- EXTRACT HEADERS FROM MULTI-LINE VARIABLES BLOCK ---
 headers = []
-start_row = None
-in_variables = False
+inside_vars = False
+data_start_line = 0
 
 for idx, line in enumerate(lines):
-    if "VARIABLES" in line.upper():
-        in_variables = True
-        headers += re.findall(r'"([^"]+)"', line)
-    elif in_variables:
-        if "ZONE" in line.upper():
-            start_row = idx + 1
-            break
-        headers += re.findall(r'"([^"]+)"', line)
+    upper = line.upper()
+    if "VARIABLES" in upper:
+        inside_vars = True
+    if inside_vars:
+        found = re.findall(r'"([^"]+)"', line)
+        headers.extend([h.strip() for h in found])
+    if inside_vars and "ZONE" in upper:
+        data_start_line = idx + 1
+        break
 
-if not headers or start_row is None:
-    print("Error: Could not find VARIABLES block or ZONE line.")
+if not headers:
+    print("[ERROR] No VARIABLES block found.")
     exit()
 
-# Clean up header names
-headers = [h.strip() for h in headers]
+print(f"[DEBUG] Found {len(headers)} variables: {headers}")
 
-# --- Load data ---
-try:
-    df = pd.read_csv(
-        file_path,
-        sep=r'\s+|\t+',
-        engine='python',
-        skiprows=start_row,
-        names=headers
-    )
-except Exception as e:
-    print(f"Error while reading the file: {e}")
+# --- EXTRACT FLAT NUMERIC DATA LIST ---
+raw_data = []
+for line in lines[data_start_line:]:
+    if "ZONE" in line.upper():
+        break
+    line = line.strip()
+    if not line or any(line.upper().startswith(k) for k in ("TITLE", "VARIABLES")):
+        continue
+    try:
+        tokens = line.split()
+        raw_data.extend([float(x) for x in tokens])
+    except ValueError:
+        print(f"[WARNING] Skipping non-numeric or malformed line: {line}")
+        continue
+
+# --- REBUILD DATAFRAME FROM BLOCKS ---
+num_vars = len(headers)
+total_values = len(raw_data)
+if total_values % num_vars != 0:
+    print(f"[ERROR] Total values ({total_values}) not divisible by number of variables ({num_vars})")
     exit()
 
+num_points = total_values // num_vars
+print(f"[DEBUG] Found {num_points} data points per species.")
+
+data = {}
+for i, name in enumerate(headers):
+    start = i * num_points
+    end = (i + 1) * num_points
+    data[name] = raw_data[start:end]
+
+df = pd.DataFrame(data)
 x_axis = headers[0]
 
-# --- Interactive plotting loop ---
-print("\nAvailable variables:")
+# --- DEBUG: SHOW STRUCTURE ---
+print(f"\nData loaded successfully with shape {df.shape}")
+print(df.head())
+
+print("\nAvailable species to plot:")
 for i, name in enumerate(headers[1:], start=1):
     print(f"{i}: {name}")
 
+# --- INTERACTIVE PLOTTING LOOP ---
 while True:
-    species = input("\nEnter species name to plot (or 'q' to quit): ").strip()
-    if species.lower() in ['q', 'quit', 'exit']:
-        print("Exiting...")
+    species_input = input("\nEnter species name to plot (or 'q' to quit): ").strip()
+    if species_input.lower() in ['q', 'quit', 'exit']:
+        print("Exiting.")
         break
 
-    if species not in df.columns:
-        print(f"Error: '{species}' not found.")
+    # Case-insensitive match
+    matches = [col for col in df.columns if col.strip().lower() == species_input.lower()]
+    if not matches:
+        print(f"[ERROR] Species '{species_input}' not found.")
         continue
+
+    species = matches[0]
 
     plt.figure(figsize=(8, 5))
     plt.plot(df[x_axis], df[species], label=species)
@@ -76,3 +103,4 @@ while True:
     plt.legend()
     plt.tight_layout()
     plt.show()
+
