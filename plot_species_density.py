@@ -27,7 +27,7 @@ def get_unit(species_name):
 
 # --- FILE SELECTION ---
 def select_files_gui():
-    """Open a GUI to select multiple files (show all by default)."""
+    """Open a GUI to select multiple files."""
     root = Tk()
     root.withdraw()
     files = filedialog.askopenfilenames(
@@ -39,13 +39,24 @@ def select_files_gui():
 
 
 # --- SAVE SPECIES TO TEXT ---
-def save_species_to_txt(df, species, output_dir):
+def save_species_to_txt(data_frame, species, output_dir):
     """Save single species data to text file."""
     os.makedirs(output_dir, exist_ok=True)
-    filename = f"{species.replace('/', '_')}.txt"
+
+    # Sanitize filename: remove invalid characters
+    invalid_chars = '<>:"/\\|?*'
+    sanitized_name = species
+    for char in invalid_chars:
+        sanitized_name = sanitized_name.replace(char, '_')
+
+    filename = f"{sanitized_name}.txt"
     filepath = os.path.join(output_dir, filename)
-    df[[df.columns[0], species]].to_csv(filepath, sep='\t', index=False)
-    print(f"Saved {species} data to {filepath}")
+
+    try:
+        data_frame[[data_frame.columns[0], species]].to_csv(filepath, sep='\t', index=False)
+        print(f"Saved {species} data to {filepath}")
+    except Exception as e:
+        print(f"Error saving {species}: {e}")
 
 
 # --- PROCESS TEC FILES ---
@@ -56,13 +67,13 @@ def process_tec_file(file_path):
 
     headers, inside_vars, data_start_line = [], False, 0
     for idx, line in enumerate(lines):
-        upper = line.upper()
-        if "VARIABLES" in upper:
+        line_upper = line.upper()
+        if "VARIABLES" in line_upper:
             inside_vars = True
         if inside_vars:
             found = re.findall(r'"([^"]+)"', line)
             headers.extend([h.strip() for h in found])
-        if inside_vars and "ZONE" in upper:
+        if inside_vars and "ZONE" in line_upper:
             data_start_line = idx + 1
             break
 
@@ -97,38 +108,21 @@ def process_tec_file(file_path):
 
 
 # --- PLOTTING ---
-def plot_species(df, species, filename=None):
+def plot_species(data_frame, species, file_name=None):
     """Plot a single species with proper units."""
-    x_axis = df.columns[0]
+    x_axis = data_frame.columns[0]
     unit = get_unit(species)
 
     plt.figure(figsize=(10, 6))
-    plt.plot(df[x_axis], df[species], label=f"{species} [{unit}]")
+    plt.plot(data_frame[x_axis], data_frame[species], label=f"{species} [{unit}]")
 
     plt.xlabel(x_axis)
     plt.ylabel(f"Concentration / {unit}")
     title = f"{species} vs {x_axis}"
-    if filename:
-        title += f" ({filename})"
+    if file_name:
+        title += f" ({file_name})"
     plt.title(title)
 
-    plt.grid(True)
-    plt.legend()
-    plt.tight_layout()
-    plt.show()
-
-
-def plot_comparison(matches, x_axis):
-    """Plot comparison of the same species across multiple .tec files."""
-    plt.figure(figsize=(10, 6))
-    unit = get_unit(matches[0][0])
-
-    for col, df, filename in matches:
-        plt.plot(df[x_axis], df[col], label=f"{col} [{unit}] ({filename})")
-
-    plt.xlabel(x_axis)
-    plt.ylabel(f"Concentration / {unit}")
-    plt.title(f"Comparison of {matches[0][0]} across files")
     plt.grid(True)
     plt.legend()
     plt.tight_layout()
@@ -160,10 +154,10 @@ def main():
         ext = Path(file_path).suffix.lower()
         try:
             if ext == '.tec':
-                df, filename = process_tec_file(file_path)
-                all_dfs.append((df, filename))
-                print(f"\nLoaded {filename} with variables:")
-                print("\n".join(f"{i}: {col}" for i, col in enumerate(df.columns[1:], 1)))
+                data_frame, file_name = process_tec_file(file_path)
+                all_dfs.append((data_frame, file_name))
+                print(f"\nLoaded {file_name} with variables:")
+                print("\n".join(f"{i}: {col}" for i, col in enumerate(data_frame.columns[1:], 1)))
             else:
                 # Just open other files (.dat, .nam, .out) for manual inspection
                 print(f"\n--- {os.path.basename(file_path)} ---")
@@ -183,52 +177,57 @@ def main():
     while True:
         print("\nAvailable commands:")
         print("  plot [species]     - Plot a species")
-        print("  compare [species]  - Compare across files")
         print("  save [species]     - Save species data to text")
         print("  list               - Show available species")
         print("  exit               - Quit program")
 
-        user_input = input("Enter command: ").strip().lower()
-        if user_input in ('exit', 'quit', 'q'):
+        user_input = input("Enter command: ").strip()
+        if user_input.lower() in ('exit', 'quit', 'q'):
             break
 
-        if user_input.startswith('list'):
-            for df, filename in all_dfs:
-                print(f"\nSpecies in {filename}:")
-                print("\n".join(df.columns[1:]))
+        if user_input.lower().startswith('list'):
+            for data_frame, file_name in all_dfs:
+                print(f"\nSpecies in {file_name}:")
+                print("\n".join(data_frame.columns[1:]))
             continue
 
-        if user_input.startswith(('plot', 'compare', 'save')):
-            command, *species_parts = user_input.split(maxsplit=1)
-            if not species_parts:
+        if user_input.lower().startswith(('plot ', 'save ')):
+            parts = user_input.split(maxsplit=1)
+            if len(parts) < 2:
                 print("Please specify a species.")
                 continue
-            species_input = species_parts[0].lower()
+
+            command = parts[0].lower()
+            species_input = parts[1]  # Keep original case for exact matching
 
             matches = []
-            for df, filename in all_dfs:
-                for col in df.columns[1:]:
-                    if species_input in col.lower():
-                        matches.append((col, df, filename))
+            for data_frame, file_name in all_dfs:
+                for col in data_frame.columns[1:]:
+                    # Exact case-insensitive matching
+                    if col.lower() == species_input.lower():
+                        matches.append((col, data_frame, file_name))
 
             if not matches:
-                print(f"No species matching '{species_input}' found.")
+                print(f"No exact match found for '{species_input}'. Available species:")
+                for data_frame, file_name in all_dfs:
+                    print(f"\nIn {file_name}:")
+                    for col in data_frame.columns[1:]:
+                        if species_input.lower() in col.lower():
+                            print(f"  - {col}")
                 continue
 
             if command == 'plot':
-                for col, df, filename in matches:
-                    plot_species(df, col, filename)
-            elif command == 'compare':
-                plot_comparison(matches, all_dfs[0][0].columns[0])
-            elif command == 'save' and args.save:
-                for col, df, filename in matches:
-                    save_species_to_txt(df, col, "species_data")
-            elif command == 'save' and not args.save:
-                print("Run with -s to enable save functionality.")
+                for col, data_frame, file_name in matches:
+                    plot_species(data_frame, col, file_name)
+            elif command == 'save':
+                if args.save:
+                    for col, data_frame, file_name in matches:
+                        save_species_to_txt(data_frame, col, "species_data")
+                else:
+                    print("Run with -s to enable save functionality.")
         else:
             print("Unknown command.")
 
 
 if __name__ == "__main__":
     main()
-
