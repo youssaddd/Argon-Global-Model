@@ -217,7 +217,7 @@ def main():
                 continue
 
             if command == 'plot':
-                for col, data_frame, file_name in matches:
+                for col, data_frame, file_name in matches
                     plot_species(data_frame, col, file_name)
             elif command == 'save':
                 if args.save:
