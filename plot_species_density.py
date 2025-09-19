@@ -4,6 +4,7 @@ import re
 from pathlib import Path
 import pandas as pd
 import matplotlib.pyplot as plt
+import numpy as np
 from tkinter import Tk, filedialog
 
 # --- UNITS ---
@@ -107,25 +108,55 @@ def process_tec_file(file_path):
     return pd.DataFrame(data), os.path.basename(file_path)
 
 
+# --- HELPER: compute exponent scaling ---
+def compute_scale(values):
+    """Return (scaled_values, exponent, factor) for scientific notation axis scaling."""
+    max_val = np.nanmax(np.abs(values))
+    if max_val == 0 or np.isnan(max_val):
+        exp = 0
+    else:
+        exp = int(np.floor(np.log10(max_val)))
+        exp = (exp // 3) * 3  # round to multiple of 3
+    factor = 10.0**exp
+    return values / factor, exp, factor
+
+
 # --- PLOTTING ---
 def plot_species(data_frame, species, file_name=None):
-    """Plot a single species with proper units."""
+    """Plot a single species with proper units and integrated scientific notation on both axes."""
     x_axis = data_frame.columns[0]
     unit = get_unit(species)
 
-    plt.figure(figsize=(10, 6))
-    plt.plot(data_frame[x_axis], data_frame[species], label=f"{species} [{unit}]")
+    x_scaled, x_exp, _ = compute_scale(data_frame[x_axis].values)
+    y_scaled, y_exp, _ = compute_scale(data_frame[species].values)
 
-    plt.xlabel(x_axis)
-    plt.ylabel(f"Concentration / {unit}")
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.plot(x_scaled, y_scaled, label=f"{species}")
+
+    # Axis labels with exponents embedded
+    if x_exp != 0:
+        ax.set_xlabel(f"{x_axis} [10^{x_exp}]")
+    else:
+        ax.set_xlabel(x_axis)
+
+    if y_exp != 0:
+        ax.set_ylabel(f"Concentration [10^{y_exp} {unit}]")
+    else:
+        ax.set_ylabel(f"Concentration [{unit}]")
+
+    # Title
     title = f"{species} vs {x_axis}"
     if file_name:
         title += f" ({file_name})"
-    plt.title(title)
+    ax.set_title(title)
 
-    plt.grid(True)
-    plt.legend()
-    plt.tight_layout()
+    # Hide any automatic offset text
+    ax.xaxis.offsetText.set_visible(False)
+    ax.yaxis.offsetText.set_visible(False)
+
+    ax.grid(True)
+    ax.legend()
+    fig.tight_layout()
     plt.show()
 
 
@@ -203,7 +234,6 @@ def main():
             matches = []
             for data_frame, file_name in all_dfs:
                 for col in data_frame.columns[1:]:
-                    # Exact case-insensitive matching
                     if col.lower() == species_input.lower():
                         matches.append((col, data_frame, file_name))
 
@@ -217,7 +247,7 @@ def main():
                 continue
 
             if command == 'plot':
-                for col, data_frame, file_name in matches
+                for col, data_frame, file_name in matches:
                     plot_species(data_frame, col, file_name)
             elif command == 'save':
                 if args.save:
@@ -231,3 +261,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
