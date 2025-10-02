@@ -1,0 +1,327 @@
+import argparse
+import os
+import re
+from pathlib import Path
+import pandas as pd
+import matplotlib.pyplot as plt
+import numpy as np
+from tkinter import Tk, filedialog
+from matplotlib.ticker import FuncFormatter
+
+# --- UNITS ---
+SPECIES_UNITS = {
+    "E": "cm⁻³",         # electrons (density)
+    "HE": "cm⁻³",        # Helium (density)
+    "HE*": "cm⁻³",       # Helium (excited) density
+    "HE+": "cm⁻³",       # Helium ion density
+    "M": "cm⁻³",         # heavy neutral density
+    "MIS": "cm⁻³",       # auxiliary/misc density
+    "TE": "K",           # electron temperature
+    "TGAS": "K",         # gas temperature
+    "EDEP": "J/cm³",     # energy deposition
+    "PDEP": "W/cm³",     # power deposition
+    "SPEED": "m/s",      # velocity
+}
+DEFAULT_UNIT = 'cm⁻³'
+NO_CONC_WORD = {"M", "MIS"}
+
+
+def get_unit(species_name):
+    key = species_name.upper()
+    if key in SPECIES_UNITS:
+        return SPECIES_UNITS[key]
+    lower = species_name.lower()
+    if "speed" in lower or "velocity" in lower:
+        return "m/s"
+    if "temp" in lower:
+        return "K"
+    if "pressure" in lower:
+        return "Pa"
+    if "density" in lower:
+        return "kg/m³"
+    return DEFAULT_UNIT
+
+
+def select_files_gui():
+    root = Tk()
+    root.withdraw()
+    files = filedialog.askopenfilenames(
+        title='Select Tecplot / GlobalKin files',
+        filetypes=[('All files', '*.*')]
+    )
+    root.destroy()
+    return files if files else None
+
+
+def save_species_to_txt(data_frame, species, output_dir):
+    os.makedirs(output_dir, exist_ok=True)
+    invalid_chars = '<>:"/\\|?*'
+    sanitized_name = species
+    for char in invalid_chars:
+        sanitized_name = sanitized_name.replace(char, '_')
+    filename = f"{sanitized_name}.txt"
+    filepath = os.path.join(output_dir, filename)
+    try:
+        data_frame[[data_frame.columns[0], species]].to_csv(filepath, sep='\t', index=False)
+        print(f"Saved {species} data to {filepath}")
+    except Exception as e:
+        print(f"Error saving {species}: {e}")
+
+
+def process_tec_file(file_path):
+    with open(file_path, "r") as f:
+        lines = f.readlines()
+
+    headers, inside_vars, data_start_line = [], False, 0
+    for idx, line in enumerate(lines):
+        line_upper = line.upper()
+        if "VARIABLES" in line_upper:
+            inside_vars = True
+        if inside_vars:
+            found = re.findall(r'"([^"]+)"', line)
+            headers.extend([h.strip() for h in found])
+        if inside_vars and "ZONE" in line_upper:
+            data_start_line = idx + 1
+            break
+
+    if not headers:
+        raise ValueError(f"No VARIABLES block found in {file_path}")
+
+    raw_data = []
+    for line in lines[data_start_line:]:
+        if "ZONE" in line.upper():
+            break
+        line = line.strip()
+        if not line or any(line.upper().startswith(k) for k in ("TITLE", "VARIABLES")):
+            continue
+        try:
+            raw_data.extend([float(x) for x in line.split()])
+        except ValueError:
+            continue
+
+    num_vars = len(headers)
+    total_values = len(raw_data)
+    if total_values % num_vars != 0:
+        raise ValueError(f"Data inconsistency in file {file_path}")
+
+    num_points = total_values // num_vars
+    data = {}
+    for i, name in enumerate(headers):
+        start = i * num_points
+        end = (i + 1) * num_points
+        data[name] = raw_data[start:end]
+
+    return pd.DataFrame(data), os.path.basename(file_path)
+
+
+def compute_scale(values):
+    """Scale values by power of 10 for compact display."""
+    max_val = np.nanmax(np.abs(values))
+    if max_val == 0 or np.isnan(max_val):
+        exp = 0
+    else:
+        exp = int(np.floor(np.log10(max_val)))
+        exp = (exp // 3) * 3
+    return values / (10**exp), exp
+
+
+def compute_relative(values, scale_factor=1e3):
+    """Return deviations from mean, scaled for visibility."""
+    baseline = np.mean(values)
+    deviations = (values - baseline) * scale_factor
+    return deviations, baseline, scale_factor
+
+
+def apply_tick_format(ax, decimals=3):
+    """Format ticks with fixed decimals, no offset text."""
+    def fixed_fmt(x, pos):
+        return f"{x:.{decimals}f}"
+    for axis in [ax.xaxis, ax.yaxis]:
+        axis.set_major_formatter(FuncFormatter(fixed_fmt))
+        axis.offsetText.set_visible(False)
+
+
+def plot_species(data_frame, species, file_name=None, relative=False):
+    x_axis = data_frame.columns[0]
+    unit = get_unit(species)
+
+    # Scale X
+    x_scaled, x_exp = compute_scale(data_frame[x_axis].values)
+
+    # Handle Y scaling
+    if relative:
+        y_scaled, baseline, factor = compute_relative(data_frame[species].values)
+        ylabel = f"{species} deviation (×{int(factor)} from mean={baseline:.3e})"
+    else:
+        y_scaled, y_exp = compute_scale(data_frame[species].values)
+        if unit == "cm⁻³" and species.upper() not in NO_CONC_WORD:
+            ylabel = f"{species} concentration / 10^{y_exp} {unit}"
+        else:
+            ylabel = f"{species} / 10^{y_exp} {unit}"
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.plot(x_scaled, y_scaled, label=f"{species} ({file_name})" if file_name else species)
+
+    ax.set_xlabel(f"{x_axis} / 10^{x_exp} cm" if x_exp != 0 else f"{x_axis} / cm")
+    ax.set_ylabel(ylabel)
+
+    ax.set_title(f"{species} vs {x_axis}")
+    apply_tick_format(ax, decimals=6 if relative else 3)
+
+    ax.grid(True)
+    ax.legend()
+    fig.tight_layout()
+    plt.show()
+
+
+def plot_species_multi(all_dfs, species, relative=False):
+    x_axis = all_dfs[0][0].columns[0]
+    unit = get_unit(species)
+
+    fig, ax1 = plt.subplots(figsize=(10, 6))
+    colors = ['tab:blue', 'tab:orange', 'tab:green', 'tab:red',
+              'tab:purple', 'tab:brown', 'tab:pink', 'tab:gray']
+    axes = [ax1]
+
+    for idx, (df, fname) in enumerate(all_dfs):
+        if species not in df.columns:
+            continue
+
+        x_scaled, x_exp = compute_scale(df[x_axis].values)
+
+        if relative:
+            y_scaled, baseline, factor = compute_relative(df[species].values)
+            ylabel = f"{species} deviation (×{int(factor)} from mean={baseline:.3e})"
+        else:
+            y_scaled, y_exp = compute_scale(df[species].values)
+            if unit == "cm⁻³" and species.upper() not in NO_CONC_WORD:
+                ylabel = f"{species} concentration / 10^{y_exp} {unit}"
+            else:
+                ylabel = f"{species} / 10^{y_exp} {unit}"
+
+        ax = ax1 if idx == 0 else ax1.twinx()
+        if idx > 0:
+            ax.spines["right"].set_position(("axes", 1 + 0.15 * (idx - 1)))
+            axes.append(ax)
+
+        ax.plot(x_scaled, y_scaled, label=f"{species} ({fname})",
+                color=colors[idx % len(colors)])
+
+        ax.set_xlabel(f"{x_axis} / 10^{x_exp} cm" if x_exp != 0 else f"{x_axis} / cm")
+        ax.set_ylabel(ylabel, color=colors[idx % len(colors)])
+        ax.tick_params(axis='y', labelcolor=colors[idx % len(colors)])
+        apply_tick_format(ax, decimals=6 if relative else 3)
+
+    lines, labels = [], []
+    for ax in axes:
+        lns, lbls = ax.get_legend_handles_labels()
+        lines.extend(lns)
+        labels.extend(lbls)
+    fig.legend(lines, labels, loc="upper right")
+
+    fig.suptitle(f"{species} vs {x_axis}")
+    fig.tight_layout()
+    plt.show()
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Global Kinetics Data Visualizer")
+    parser.add_argument('-f', '--files', nargs='+', help="File paths (.tec, .dat, .nam, .out)")
+    parser.add_argument('-g', '--gui', action='store_true', help="Use GUI file selector")
+    parser.add_argument('-s', '--save', action='store_true', help="Save species data to text files")
+    parser.add_argument('--relative', action='store_true', help="Plot deviations from mean instead of absolute values")
+    args = parser.parse_args()
+
+    if args.gui:
+        file_paths = select_files_gui()
+        if not file_paths:
+            print("No files selected.")
+            return
+    elif args.files:
+        file_paths = args.files
+    else:
+        print("No files specified. Use -g to select files via GUI or -f to specify paths.")
+        return
+
+    all_dfs = []
+    for file_path in file_paths:
+        ext = Path(file_path).suffix.lower()
+        try:
+            if ext == '.tec':
+                df, fname = process_tec_file(file_path)
+                all_dfs.append((df, fname))
+                print(f"\nLoaded {fname} with variables:")
+                print("\n".join(f"{i}: {col}" for i, col in enumerate(df.columns[1:], 1)))
+            else:
+                print(f"\n--- {os.path.basename(file_path)} ---")
+                with open(file_path, 'r', errors='ignore') as f:
+                    preview = f.read(500)
+                print(preview)
+                print("\n[Full file opened in background for reference]")
+        except Exception as e:
+            print(f"Error processing {file_path}: {e}")
+            continue
+
+    if not all_dfs:
+        print("\nNo .tec files loaded for plotting.")
+        return
+
+    while True:
+        print("\nAvailable commands:")
+        print("  plot [species]     - Plot a species (overlay if multiple files loaded)")
+        print("  save [species]     - Save species data to text")
+        print("  list               - Show available species")
+        print("  exit               - Quit program")
+
+        user_input = input("Enter command: ").strip()
+        if user_input.lower() in ('exit', 'quit', 'q'):
+            break
+
+        if user_input.lower().startswith('list'):
+            for df, fname in all_dfs:
+                print(f"\nSpecies in {fname}:")
+                print("\n".join(df.columns[1:]))
+            continue
+
+        if user_input.lower().startswith(('plot ', 'save ')):
+            parts = user_input.split(maxsplit=1)
+            if len(parts) < 2:
+                print("Please specify a species.")
+                continue
+
+            command = parts[0].lower()
+            species_input = parts[1]
+
+            matches = []
+            for df, fname in all_dfs:
+                for col in df.columns[1:]:
+                    if col.lower() == species_input.lower():
+                        matches.append((col, df, fname))
+
+            if not matches:
+                print(f"No exact match found for '{species_input}'. Available species:")
+                for df, fname in all_dfs:
+                    print(f"\nIn {fname}:")
+                    for col in df.columns[1:]:
+                        if species_input.lower() in col.lower():
+                            print(f"  - {col}")
+                continue
+
+            if command == 'plot':
+                if len(all_dfs) > 1:
+                    plot_species_multi(all_dfs, matches[0][0], relative=args.relative)
+                else:
+                    for col, df, fname in matches:
+                        plot_species(df, col, fname, relative=args.relative)
+            elif command == 'save':
+                if args.save:
+                    for col, df, fname in matches:
+                        save_species_to_txt(df, col, "species_data")
+                else:
+                    print("Run with -s to enable save functionality.")
+        else:
+            print("Unknown command.")
+
+
+if __name__ == "__main__":
+    main()
