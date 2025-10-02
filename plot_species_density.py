@@ -11,15 +11,30 @@ from tkinter import Tk, filedialog
 SPECIAL_UNITS = {
     'velocity': 'm/s',
     'temp': 'K',
+    'te': 'eV',
+    'temperature': 'K',
     'pressure': 'Pa',
-    'density': 'kg/m³'
+    'density': 'kg/m³',
+    'n_e': 'cm⁻³',
+    'ne': 'cm⁻³',
+    'electron': 'cm⁻³',
+    't': 's',
+    'time': 's',
+    'x': 'cm',
+    'y': 'cm',
+    'z': 'cm'
 }
 DEFAULT_UNIT = 'cm⁻³'
 
 
-def get_unit(species_name):
+def clean_name(name):
+    """Remove units in parentheses or brackets from column names."""
+    return re.sub(r"\s*[\(\[].*?[\)\]]", "", name).strip()
+
+
+def get_unit(name):
     """Return display unit for a species/variable name."""
-    lower_name = species_name.lower()
+    lower_name = name.lower()
     for key, unit in SPECIAL_UNITS.items():
         if key in lower_name:
             return unit
@@ -73,7 +88,7 @@ def process_tec_file(file_path):
             inside_vars = True
         if inside_vars:
             found = re.findall(r'"([^"]+)"', line)
-            headers.extend([h.strip() for h in found])
+            headers.extend([clean_name(h.strip()) for h in found])
         if inside_vars and "ZONE" in line_upper:
             data_start_line = idx + 1
             break
@@ -123,9 +138,12 @@ def compute_scale(values):
 
 # --- PLOTTING ---
 def plot_species(data_frame, species, file_name=None):
-    """Plot a single species with proper units and integrated scientific notation on both axes."""
+    """Plot a single species with proper units and scientific notation on axes."""
     x_axis = data_frame.columns[0]
-    unit = get_unit(species)
+
+    # Get units for x and y
+    x_unit = get_unit(x_axis)
+    y_unit = get_unit(species)
 
     x_scaled, x_exp, _ = compute_scale(data_frame[x_axis].values)
     y_scaled, y_exp, _ = compute_scale(data_frame[species].values)
@@ -133,16 +151,17 @@ def plot_species(data_frame, species, file_name=None):
     fig, ax = plt.subplots(figsize=(10, 6))
     ax.plot(x_scaled, y_scaled, label=f"{species}")
 
-    # Axis labels with exponents embedded
+    # X-axis label
     if x_exp != 0:
-        ax.set_xlabel(f"{x_axis} [10^{x_exp}]")
+        ax.set_xlabel(f"{x_axis}/10^{x_exp} {x_unit}")
     else:
-        ax.set_xlabel(x_axis)
+        ax.set_xlabel(f"{x_axis}/{x_unit}")
 
+    # Y-axis label
     if y_exp != 0:
-        ax.set_ylabel(f"Concentration [10^{y_exp} {unit}]")
+        ax.set_ylabel(f"{species}/10^{y_exp} {y_unit}")
     else:
-        ax.set_ylabel(f"Concentration [{unit}]")
+        ax.set_ylabel(f"{species}/{y_unit}")
 
     # Title
     title = f"{species} vs {x_axis}"
@@ -150,7 +169,7 @@ def plot_species(data_frame, species, file_name=None):
         title += f" ({file_name})"
     ax.set_title(title)
 
-    # Hide any automatic offset text
+    # Hide automatic offset
     ax.xaxis.offsetText.set_visible(False)
     ax.yaxis.offsetText.set_visible(False)
 
@@ -261,4 +280,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
