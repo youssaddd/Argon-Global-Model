@@ -1,0 +1,327 @@
+import argparse
+import os
+import re
+from pathlib import Path
+import pandas as pd
+import matplotlib.pyplot as plt
+import numpy as np
+from tkinter import Tk, filedialog
+
+# --- UNITS ---
+SPECIAL_UNITS = {
+    'velocity': 'm/s',
+    'temp': 'K',
+    'te': 'eV',
+    'temperature': 'K',
+    'pressure': 'Pa',
+    'density': 'kg/m³',
+    'n_e': 'cm⁻³',
+    'ne': 'cm⁻³',
+    'electron': 'cm⁻³',
+    't': 's',
+    'time': 's',
+    'x': 'cm',
+    'y': 'cm',
+    'z': 'cm'
+}
+DEFAULT_UNIT = 'cm⁻³'
+
+
+def clean_name(name):
+    """Remove units in parentheses or brackets from column names."""
+    return re.sub(r"\s*[\(\[].*?[\)\]]", "", name).strip()
+
+
+def get_unit(name):
+    """Return display unit for a species/variable name."""
+    lower_name = name.lower()
+    for key, unit in SPECIAL_UNITS.items():
+        if key in lower_name:
+            return unit
+    return DEFAULT_UNIT
+
+
+# --- FILE SELECTION ---
+def select_files_gui():
+    """Open a GUI to select multiple files."""
+    root = Tk()
+    root.withdraw()
+    files = filedialog.askopenfilenames(
+        title='Select Tecplot / GlobalKin files',
+        filetypes=[('All files', '*.*')]
+    )
+    root.destroy()
+    return files if files else None
+
+
+# --- SAVE SPECIES TO TEXT ---
+def save_species_to_txt(data_frame, species, output_dir):
+    """Save single species data to text file."""
+    os.makedirs(output_dir, exist_ok=True)
+
+    invalid_chars = '<>:"/\\|?*'
+    sanitized_name = species
+    for char in invalid_chars:
+        sanitized_name = sanitized_name.replace(char, '_')
+
+    filename = f"{sanitized_name}.txt"
+    filepath = os.path.join(output_dir, filename)
+
+    try:
+        data_frame[[data_frame.columns[0], species]].to_csv(filepath, sep='\t', index=False)
+        print(f"Saved {species} data to {filepath}")
+    except Exception as e:
+        print(f"Error saving {species}: {e}")
+
+
+# --- PROCESS TEC FILES ---
+def process_tec_file(file_path):
+    """Parse Tecplot .tec ASCII data files."""
+    with open(file_path, "r") as f:
+        lines = f.readlines()
+
+    headers, inside_vars, data_start_line = [], False, 0
+    for idx, line in enumerate(lines):
+        line_upper = line.upper()
+        if "VARIABLES" in line_upper:
+            inside_vars = True
+        if inside_vars:
+            found = re.findall(r'"([^"]+)"', line)
+            headers.extend([clean_name(h.strip()) for h in found])
+        if inside_vars and "ZONE" in line_upper:
+            data_start_line = idx + 1
+            break
+
+    if not headers:
+        raise ValueError(f"No VARIABLES block found in {file_path}")
+
+    raw_data = []
+    for line in lines[data_start_line:]:
+        if "ZONE" in line.upper():
+            break
+        line = line.strip()
+        if not line or any(line.upper().startswith(k) for k in ("TITLE", "VARIABLES")):
+            continue
+        try:
+            raw_data.extend([float(x) for x in line.split()])
+        except ValueError:
+            continue
+
+    num_vars = len(headers)
+    total_values = len(raw_data)
+    if total_values % num_vars != 0:
+        raise ValueError(f"Data inconsistency in file {file_path}")
+
+    num_points = total_values // num_vars
+    data = {}
+    for i, name in enumerate(headers):
+        start = i * num_points
+        end = (i + 1) * num_points
+        data[name] = raw_data[start:end]
+
+    return pd.DataFrame(data), os.path.basename(file_path)
+
+
+# --- HELPER: compute exponent scaling ---
+def compute_scale(values):
+    """Return (scaled_values, exponent, factor) for scientific notation axis scaling."""
+    finite_vals = np.array(values)[np.isfinite(values)]
+    if finite_vals.size == 0:
+        return values, 0, 1.0
+
+    max_val = np.nanmax(np.abs(finite_vals))
+    if max_val == 0:
+        return values, 0, 1.0
+
+    exp = int(np.floor(np.log10(max_val)))
+    exp = (exp // 3) * 3  # round to multiple of 3
+    factor = 10.0 ** exp
+    return values / factor, exp, factor
+
+
+# --- MULTI-FILE AUTO SCALE PLOTTING ---
+# --- MULTI-FILE LOG-SCALE PLOTTING (normalized across species) ---
+def plot_species_multi(all_dfs, species):
+    """
+    Plot the same species from multiple files on one figure with:
+    - Logarithmic Y-axis for all plots
+    - Normalized concentrations (same Größenordnung)
+    - Independent scaling per file shown in legend
+    - Axis labels follow format X/cm and Species/cm⁻³
+    """
+    if not all_dfs:
+        print("No data to plot.")
+        return
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    colors = plt.cm.tab10.colors
+    plotted_any = False
+
+    all_y_vals = []  # collect all y values for global reference if needed
+
+    # First pass to determine global max for normalization
+    for df, _ in all_dfs:
+        matches = [col for col in df.columns if col.lower() == species.lower()]
+        if matches:
+            y_vals = np.array(df[matches[0]], dtype=float)
+            finite_mask = np.isfinite(y_vals) & (y_vals > 0)
+            if finite_mask.any():
+                all_y_vals.append(y_vals[finite_mask])
+
+    if not all_y_vals:
+        print(f"No valid positive data found for species '{species}'.")
+        return
+
+    global_max = np.nanmax([np.nanmax(vals) for vals in all_y_vals])
+
+    # --- Plot each file ---
+    for idx, (df, file_name) in enumerate(all_dfs):
+        matches = [col for col in df.columns if col.lower() == species.lower()]
+        if not matches:
+            print(f"Skipping {file_name}: species '{species}' not found.")
+            continue
+
+        species_col = matches[0]
+        x_axis = df.columns[0]
+        x_unit = get_unit(x_axis)
+        y_unit = get_unit(species_col)
+
+        x_vals = np.array(df[x_axis], dtype=float)
+        y_vals = np.array(df[species_col], dtype=float)
+
+        # Filter out invalids
+        finite_mask = np.isfinite(y_vals) & (y_vals > 0)
+        if not finite_mask.any():
+            print(f"Skipping {file_name}: no valid positive values for '{species}'.")
+            continue
+
+        y_vals = y_vals[finite_mask]
+        x_vals = x_vals[finite_mask]
+
+        # Scale by global maximum (so all plots share the same Größenordnung)
+        y_scaled, y_exp, _ = compute_scale(y_vals / global_max)
+
+        ax.plot(
+            x_vals,
+            y_scaled,
+            lw=2.0,
+            color=colors[idx % len(colors)],
+            label=f"{file_name} ×10^{y_exp}"
+        )
+        plotted_any = True
+
+    if not plotted_any:
+        print(f"No valid data found for '{species}'.")
+        plt.close(fig)
+        return
+
+    # --- Apply log scale for all species ---
+    ax.set_yscale("log")
+    ax.set_title(f"{species} (normalized, log scale)", fontsize=13)
+    print(f"Using logarithmic Y-axis for '{species}' and normalized data across files.")
+
+    # --- Labels ---
+    ax.set_xlabel(f"{x_axis}/{x_unit}", fontsize=12)
+    ax.set_ylabel(f"{species}/(normalized {y_unit})", fontsize=12)
+
+    # --- Remove scientific offsets ---
+    ax.xaxis.offsetText.set_visible(False)
+    ax.yaxis.offsetText.set_visible(False)
+
+    # --- Final styling ---
+    ax.grid(True, which="both", linestyle="--", alpha=0.6)
+    ax.legend(loc="best")
+    fig.tight_layout()
+    plt.show()
+
+
+# --- MAIN FUNCTION ---
+def main():
+    parser = argparse.ArgumentParser(description="Global Kinetics Data Visualizer")
+    parser.add_argument('-f', '--files', nargs='+', help="File paths (.tec, .dat, .nam, .out)")
+    parser.add_argument('-g', '--gui', action='store_true', help="Use GUI file selector")
+    parser.add_argument('-s', '--save', action='store_true', help="Save species data to text files")
+    args = parser.parse_args()
+
+    # Choose files
+    if args.gui:
+        file_paths = select_files_gui()
+        if not file_paths:
+            print("No files selected.")
+            return
+    elif args.files:
+        file_paths = args.files
+    else:
+        print("No files specified. Use -g to select files via GUI or -f to specify paths.")
+        return
+
+    all_dfs = []
+    for file_path in file_paths:
+        ext = Path(file_path).suffix.lower()
+        try:
+            if ext == '.tec':
+                df, file_name = process_tec_file(file_path)
+                all_dfs.append((df, file_name))
+                print(f"\nLoaded {file_name} with variables:")
+                print("\n".join(f"{i}: {col}" for i, col in enumerate(df.columns[1:], 1)))
+            else:
+                print(f"\n--- {os.path.basename(file_path)} ---")
+                with open(file_path, 'r', errors='ignore') as f:
+                    preview = f.read(500)
+                print(preview)
+                print("\n[Preview shown; file not parsed]")
+        except Exception as e:
+            print(f"Error processing {file_path}: {e}")
+            continue
+
+    if not all_dfs:
+        print("\nNo .tec files loaded for plotting.")
+        return
+
+    while True:
+        print("\nAvailable commands:")
+        print("  plot [species]     - Plot a species (overlay across files)")
+        print("  save [species]     - Save species data to text")
+        print("  list               - Show available species")
+        print("  exit               - Quit program")
+
+        user_input = input("Enter command: ").strip()
+        if user_input.lower() in ('exit', 'quit', 'q'):
+            break
+
+        if user_input.lower().startswith('list'):
+            for df, file_name in all_dfs:
+                print(f"\nSpecies in {file_name}:")
+                print("\n".join(df.columns[1:]))
+            continue
+
+        if user_input.lower().startswith(('plot ', 'save ')):
+            parts = user_input.split(maxsplit=1)
+            if len(parts) < 2:
+                print("Please specify a species.")
+                continue
+
+            command = parts[0].lower()
+            species_input = parts[1]
+
+            matches_exist = any(species_input.lower() == c.lower() for df, _ in all_dfs for c in df.columns)
+            if not matches_exist:
+                print(f"No exact match for '{species_input}'. Try 'list' to see available species.")
+                continue
+
+            if command == 'plot':
+                plot_species_multi(all_dfs, species_input)
+            elif command == 'save':
+                if args.save:
+                    for df, file_name in all_dfs:
+                        for col in df.columns:
+                            if col.lower() == species_input.lower():
+                                save_species_to_txt(df, col, "species_data")
+                else:
+                    print("Run with -s to enable save functionality.")
+        else:
+            print("Unknown command.")
+
+
+if __name__ == "__main__":
+    main()
